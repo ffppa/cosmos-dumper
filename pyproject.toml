@@ -1,0 +1,25 @@
+[project]
+name = "mongo-dumper"
+version = "0.1.0"
+description = "Default template for PDM package"
+authors = [
+    {name = "fabio.felici", email = "fabio.felici96c@gmail.com"},
+]
+dependencies = ["azure-cosmos>=4.14.6", "python-dotenv>=1.2.1", "loguru>=0.7.3", "tqdm>=4.67.3"]
+requires-python = "==3.14.*"
+readme = "README.md"
+license = {text = "MIT"}
+
+
+[project.scripts]
+mongo-dumper = "mongo_dumper.cli:main"
+
+[tool.pdm]
+distribution = true
+
+[tool.pdm.build]
+includes = ["mongo_dumper/"]
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
