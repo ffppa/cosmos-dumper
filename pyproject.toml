@@ -1,5 +1,5 @@
 [project]
-name = "mongo-dumper"
+name = "cosmos-dumper"
 version = "0.1.0"
 description = "Default template for PDM package"
 authors = [
@@ -12,13 +12,13 @@ license = {text = "MIT"}
 
 
 [project.scripts]
-mongo-dumper = "mongo_dumper.cli:main"
+cosmos-dumper = "cosmos_dumper.cli:main"
 
 [tool.pdm]
 distribution = true
 
 [tool.pdm.build]
-includes = ["mongo_dumper/"]
+includes = ["cosmos_dumper/"]
 
 [build-system]
 requires = ["pdm-backend"]

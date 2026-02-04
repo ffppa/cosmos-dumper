@@ -19,7 +19,7 @@ A CLI tool to export data from Azure Cosmos DB (SQL API) to JSON format, featuri
 1. Clone the repository:
    ```bash
    git clone <repository-url>
-   cd mongo-dumper
+   cd cosmos-dumper
    ```
 
 2. Install dependencies and the project with PDM:
@@ -48,7 +48,7 @@ Edit the `.env` file with your details:
 
 You can run the tool using the installed CLI command:
 ```bash
-pdm run mongo-dumper
+pdm run cosmos-dumper
 ```
 
 ### Command Line Options
