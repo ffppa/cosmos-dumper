@@ -26,6 +26,10 @@ A CLI tool to export data from Azure Cosmos DB (SQL API) to JSON format, featuri
    ```bash
    pdm install
    ```
+   **or**
+   ```bash
+   pip install .
+   ```
 
 ## Configuration
 
