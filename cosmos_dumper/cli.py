@@ -53,6 +53,11 @@ def main():
         default=os.getenv("COSMOS_EXPORT_CONTAINER_NAME"),
         help="Specific container to export (optional) (default: from COSMOS_EXPORT_CONTAINER_NAME env)",
     )
+    parser.add_argument(
+        "--jsonl",
+        action="store_true",
+        help="Export in JSON Lines format (one JSON object per line) instead of a JSON array. Recommended for large datasets.",
+    )
 
     args = parser.parse_args()
 
@@ -62,6 +67,7 @@ def main():
     key = args.key
     database_name = args.db
     target_container = args.container
+    use_jsonl = args.jsonl
 
     if not all([url, key, database_name]):
         logger.error(
@@ -92,7 +98,7 @@ def main():
         logger.info(f"Starting export for container: {container_name}")
         container_client = db.get_container_client(container_name)
 
-        items = []
+        item_count = 0
         container_ru = 0.0
 
         def response_hook(headers, properties):
@@ -108,14 +114,29 @@ def main():
                 response_hook=response_hook,
             )
 
-            for page in query_iterable.by_page():
-                items.extend(list(page))
+            extension = "jsonl" if use_jsonl else "json"
+            file_path = f"{export_folder}/{container_name}_export.{extension}"
 
-            with open(f"{export_folder}/{container_name}_export.json", "w") as f:
-                json.dump(items, f)
+            with open(file_path, "w") as f:
+                if not use_jsonl:
+                    f.write("[\n")
+
+                for page in query_iterable.by_page():
+                    for i, item in enumerate(page):
+                        if item_count > 0:
+                            if use_jsonl:
+                                f.write("\n")
+                            else:
+                                f.write(",\n")
+                        
+                        f.write(json.dumps(item))
+                        item_count += 1
+
+                if not use_jsonl:
+                    f.write("\n]")
 
             logger.success(
-                f"Exported {len(items)} items from {container_name}. RU consumed: {container_ru:.2f}"
+                f"Exported {item_count} items from {container_name}. RU consumed: {container_ru:.2f}"
             )
         except Exception as e:
             logger.error(f"Error exporting {container_name}: {e}")

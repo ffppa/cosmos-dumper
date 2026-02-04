@@ -1,11 +1,13 @@
 # Cosmos DB Data Export Tool
 
-A CLI tool to export data from Azure Cosmos DB (SQL API) to JSON format, featuring real-time Request Units (RU/s) consumption monitoring.
+A CLI tool to export data from Azure Cosmos DB (SQL API) to JSON format, featuring real-time Request Units (RU/s) consumption monitoring and memory-efficient streaming.
 
 ## Features
 
 - **Parallel Export**: Uses a thread pool to export containers in parallel.
 - **Real-time Statistics**: Monitors total RU consumed and the RU/s rate during the operation.
+- **Memory Efficient**: Streams data directly to disk to handle large datasets (800GB+) without high RAM usage.
+- **JSON Lines Support**: Option to export in `.jsonl` format for better performance with large data.
 - **Flexibility**: Export all containers or a specific one using CLI arguments.
 - **Easy Configuration**: Supports environment variables via `.env` file or command-line options.
 
@@ -59,15 +61,21 @@ You can override the `.env` configuration using arguments:
 - `--key`: Primary key.
 - `--db`: Database name.
 - `--container`: Specific container name to export.
+- `--jsonl`: Use JSON Lines format (highly recommended for large datasets).
+
+Example for a large export in JSONL:
+```bash
+pdm run cosmos-dumper --jsonl
+```
 
 Example for a single container:
 ```bash
-pdm run mongo-dumper --container "my-collection"
+pdm run cosmos-dumper --container "my-collection"
 ```
 
 Show help:
 ```bash
-pdm run mongo-dumper --help
+pdm run cosmos-dumper --help
 ```
 
 ## Output
