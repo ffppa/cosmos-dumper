@@ -1,10 +1,10 @@
-# Cosmos DB Data Export Tool
+# Cosmos DB Data Import/Export Tool
 
-A CLI tool to export data from Azure Cosmos DB (SQL API) to JSON format, featuring real-time Request Units (RU/s) consumption monitoring and memory-efficient streaming.
+A CLI tool to import/export data from Azure Cosmos DB (SQL API) to JSON format, featuring real-time Request Units (RU/s) consumption monitoring and memory-efficient streaming.
 
 ## Features
 
-- **Parallel Export**: Uses a thread pool to export containers in parallel.
+- **Parallel Import/Export**: Uses a thread pool to import/export containers in parallel.
 - **Real-time Statistics**: Monitors total RU consumed and the RU/s rate during the operation.
 - **Memory Efficient**: Streams data directly to disk to handle large datasets (800GB+) without high RAM usage.
 - **JSON Lines Support**: Option to export in `.jsonl` format for better performance with large data.
@@ -48,34 +48,64 @@ Edit the `.env` file with your details:
 
 ## Usage
 
-You can run the tool using the installed CLI command:
+The tool is organized into two main sub-commands: `export` and `import`.
+
+### 1. Exporting Data
+
+Export data from Azure Cosmos DB to JSON/JSONL files.
+
 ```bash
-pdm run cosmos-dumper
+pdm run cosmos-dumper export [options]
 ```
 
-### Command Line Options
-
-You can override the `.env` configuration using arguments:
-
+#### Export Options:
 - `--url`: Cosmos DB endpoint URL.
 - `--key`: Primary key.
 - `--db`: Database name.
 - `--container`: Specific container name to export.
 - `--jsonl`: Use JSON Lines format (highly recommended for large datasets).
 
-Example for a large export in JSONL:
+Example:
 ```bash
-pdm run cosmos-dumper --jsonl
+pdm run cosmos-dumper export --jsonl
 ```
 
-Example for a single container:
+### 2. Importing Data
+
+Import data from JSON/JSONL files back into Azure Cosmos DB.
+
 ```bash
-pdm run cosmos-dumper --container "my-collection"
+pdm run cosmos-dumper import --path <file_or_directory> [options]
 ```
 
-Show help:
+#### Import Options:
+- `--path`: Path to a specific `.json`/`.jsonl` file or a directory containing exported files.
+- `--url`, `--key`, `--db`: Database credentials.
+- `--container`: Target container name. If importing a single file, this renames the container in Cosmos DB. If importing a directory, it filters the files.
+- `--from-container`: (Optional) Use when importing from a directory to select a specific container and optionally rename it using `--container`.
+
+Example (Import and rename):
+```bash
+pdm run cosmos-dumper import --path ./export/my_db/old_container_export.json --container new_container_name
+```
+
+Example (Import specific container from directory and rename it):
+```bash
+pdm run cosmos-dumper import --path ./export/my_db/ --from-container old_name --container new_name
+```
+
+### Common Configuration
+
+You can still use a `.env` file or environment variables to avoid passing credentials every time:
+- `COSMOS_EXPORT_URL`
+- `COSMOS_EXPORT_KEY`
+- `COSMOS_EXPORT_DB_NAME`
+
+Show help for any command:
 ```bash
 pdm run cosmos-dumper --help
+pdm run cosmos-dumper export --help
+pdm run cosmos-dumper import --help
 ```
 
 ## Output
