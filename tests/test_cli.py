@@ -137,6 +137,8 @@ async def test_import_cmd_basic(tmp_path):
     args.path = str(export_dir)
     args.container = None
     args.from_container = None
+    args.concurrency = 50
+    args.shuffle = False
 
     # Mock CosmosClient and hierarchy
     with patch("cosmos_dumper.cli.CosmosClient", new_callable=MagicMock) as MockClient:

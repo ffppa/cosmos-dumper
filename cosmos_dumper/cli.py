@@ -10,6 +10,7 @@ from tqdm.asyncio import tqdm
 from loguru import logger
 import glob
 import aiofiles
+import random
 
 
 def setup_logging():
@@ -250,7 +251,7 @@ async def import_cmd(args):
             logger.warning(f"No files found to import in {path}")
             return
 
-        semaphore = asyncio.Semaphore(50)  # Limit concurrent upserts
+        semaphore = asyncio.Semaphore(args.concurrency)  # Limit concurrent upserts
 
         async def import_file(container_name, file_path):
             nonlocal total_ru
@@ -261,13 +262,23 @@ async def import_cmd(args):
 
             try:
                 await db.create_container_if_not_exists(
-                    id=container_name, partition_key={"paths": ["/id"], "kind": "Hash"}
+                    id=container_name,
+                    partition_key={"paths": ["/id"], "kind": "Hash"},
+                    indexing_policy={"indexingMode": "none"},
                 )
-                logger.debug(f"Container {container_name} verified/created.")
+                logger.debug(f"Container {container_name} verified/created with indexingMode: none.")
             except Exception as e:
                 logger.warning(
                     f"Could not verify/create container {container_name}: {e}"
                 )
+
+            # Keep track of original indexing policy to restore it later
+            original_indexing_policy = None
+            try:
+                properties = await container_client.get_container_properties()
+                original_indexing_policy = properties.get("indexingPolicy")
+            except Exception as e:
+                logger.warning(f"Could not retrieve properties for {container_name}: {e}")
 
             def response_hook(headers, properties):
                 nonlocal total_ru
@@ -289,36 +300,70 @@ async def import_cmd(args):
 
             try:
                 is_jsonl = file_path.endswith(".jsonl")
-                upsert_tasks = []
 
                 if is_jsonl:
                     async with aiofiles.open(file_path, "r") as f:
-                        async for line in f:
-                            if line.strip():
-                                item = json.loads(line)
-                                upsert_tasks.append(
-                                    asyncio.create_task(upsert_with_semaphore(item))
-                                )
+                        if args.shuffle:
+                            logger.info(f"Reading and shuffling {file_path}...")
+                            lines = await f.readlines()
+                            items = [json.loads(line) for line in lines if line.strip()]
+                            random.shuffle(items)
+                            upsert_tasks = [
+                                asyncio.create_task(upsert_with_semaphore(item))
+                                for item in items
+                            ]
+                            if upsert_tasks:
+                                await asyncio.gather(*upsert_tasks)
+                        else:
+                            active_tasks = set()
+                            async for line in f:
+                                if line.strip():
+                                    item = json.loads(line)
+                                    task = asyncio.create_task(upsert_with_semaphore(item))
+                                    active_tasks.add(task)
+                                    task.add_done_callback(active_tasks.discard)
+                                    
+                                    # Limit the number of pending tasks to avoid memory issues
+                                    if len(active_tasks) >= args.concurrency * 2:
+                                        await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
+                            
+                            if active_tasks:
+                                await asyncio.gather(*active_tasks)
                 else:
                     async with aiofiles.open(file_path, "r") as f:
                         content = await f.read()
                         data = json.loads(content)
                         if isinstance(data, list):
-                            for item in data:
-                                upsert_tasks.append(
-                                    asyncio.create_task(upsert_with_semaphore(item))
-                                )
+                            items = data
                         else:
-                            upsert_tasks.append(
-                                asyncio.create_task(upsert_with_semaphore(data))
-                            )
+                            items = [data]
 
-                if upsert_tasks:
-                    await asyncio.gather(*upsert_tasks)
+                        if args.shuffle:
+                            random.shuffle(items)
+
+                        active_tasks = set()
+                        for item in items:
+                            task = asyncio.create_task(upsert_with_semaphore(item))
+                            active_tasks.add(task)
+                            task.add_done_callback(active_tasks.discard)
+                            
+                            if len(active_tasks) >= args.concurrency * 2:
+                                await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
+                        
+                        if active_tasks:
+                            await asyncio.gather(*active_tasks)
 
                 logger.success(
                     f"Imported {items_imported} items into [{container_name}]"
                 )
+
+                if original_indexing_policy and original_indexing_policy.get("indexingMode") != "none":
+                    logger.info(f"Restoring indexing policy for {container_name}...")
+                    try:
+                        await db.replace_container(container_name, original_indexing_policy)
+                        logger.success(f"Indexing policy restored for {container_name}")
+                    except Exception as e:
+                        logger.error(f"Failed to restore indexing policy for {container_name}: {e}")
             except Exception as e:
                 logger.error(f"Error reading file {file_path}: {e}")
 
@@ -385,6 +430,17 @@ def main():
     parser_import.add_argument(
         "--from-container",
         help="Pick only this container name from directory for import (use with --container to rename)",
+    )
+    parser_import.add_argument(
+        "--concurrency",
+        type=int,
+        default=50,
+        help="Number of concurrent upserts (default: 50)",
+    )
+    parser_import.add_argument(
+        "--shuffle",
+        action="store_true",
+        help="Shuffle items before importing to distribute load across partitions",
     )
     parser_import.set_defaults(func=lambda args: asyncio.run(import_cmd(args)))
 
