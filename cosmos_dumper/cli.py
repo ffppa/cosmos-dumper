@@ -303,40 +303,44 @@ async def import_cmd(args):
 
                 if is_jsonl:
                     async with aiofiles.open(file_path, "r") as f:
-                        if args.shuffle:
-                            logger.info(f"Reading and shuffling {file_path}...")
-                            lines = await f.readlines()
-                            items = [json.loads(line) for line in lines if line.strip()]
-                            random.shuffle(items)
-                            upsert_tasks = [
-                                asyncio.create_task(upsert_with_semaphore(item))
-                                for item in items
-                            ]
-                            if upsert_tasks:
-                                await asyncio.gather(*upsert_tasks)
-                        else:
-                            active_tasks = set()
-                            async for line in f:
-                                if line.strip():
-                                    item = json.loads(line)
-                                    task = asyncio.create_task(upsert_with_semaphore(item))
-                                    active_tasks.add(task)
-                                    task.add_done_callback(active_tasks.discard)
-                                    
-                                    # Limit the number of pending tasks to avoid memory issues
-                                    if len(active_tasks) >= args.concurrency * 2:
-                                        await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
-                            
-                            if active_tasks:
-                                await asyncio.gather(*active_tasks)
+                        active_tasks = set()
+                        buffer = []
+                        buffer_size = 10000  # Reasonable buffer size for shuffling
+
+                        async def process_item(item_to_process):
+                            task = asyncio.create_task(upsert_with_semaphore(item_to_process))
+                            active_tasks.add(task)
+                            task.add_done_callback(active_tasks.discard)
+                            if len(active_tasks) >= args.concurrency * 2:
+                                await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
+
+                        async for line in f:
+                            if line.strip():
+                                item = json.loads(line)
+                                if args.shuffle:
+                                    buffer.append(item)
+                                    if len(buffer) >= buffer_size:
+                                        idx = random.randrange(len(buffer))
+                                        item_to_upsert = buffer.pop(idx)
+                                        await process_item(item_to_upsert)
+                                else:
+                                    await process_item(item)
+                        
+                        # Flush the buffer if shuffling was enabled
+                        if args.shuffle and buffer:
+                            random.shuffle(buffer)
+                            for item_to_upsert in buffer:
+                                await process_item(item_to_upsert)
+
+                        if active_tasks:
+                            await asyncio.gather(*active_tasks)
                 else:
+                    # For non-JSONL files, we still have a potential memory issue if the file is huge.
+                    # But standard JSON must be valid, so we usually have to read it all unless we use a streaming parser.
                     async with aiofiles.open(file_path, "r") as f:
                         content = await f.read()
                         data = json.loads(content)
-                        if isinstance(data, list):
-                            items = data
-                        else:
-                            items = [data]
+                        items = data if isinstance(data, list) else [data]
 
                         if args.shuffle:
                             random.shuffle(items)
