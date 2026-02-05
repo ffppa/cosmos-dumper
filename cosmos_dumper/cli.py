@@ -307,7 +307,7 @@ async def import_cmd(args):
             try:
                 active_tasks = set()
                 buffer = []
-                buffer_size = 5000
+                buffer_size = 100000
 
                 async def process_item(item_to_process):
                     task = asyncio.create_task(upsert_with_semaphore(item_to_process))
