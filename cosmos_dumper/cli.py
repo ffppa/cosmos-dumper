@@ -299,12 +299,15 @@ async def import_cmd(args):
                     except Exception as e:
                         logger.error(f"Error importing item in {container_name}: {e}")
 
-            try:
-                is_jsonl = file_path.endswith(".jsonl")
 
+            def pick_from_buffer():
+                idx = random.randrange(len(buffer))
+                return buffer.pop(idx)
+
+            try:
                 active_tasks = set()
                 buffer = []
-                buffer_size = 200  # buffer size to avoid OOM with large items
+                buffer_size = 5000
 
                 async def process_item(item_to_process):
                     task = asyncio.create_task(upsert_with_semaphore(item_to_process))
@@ -313,61 +316,35 @@ async def import_cmd(args):
                     if len(active_tasks) >= args.concurrency + 5:
                         await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
 
-                if is_jsonl:
-                    with open(file_path, "rb") as f:
-                        for line in f:
-                            if line.strip():
-                                item = json.loads(line)
-                                if args.shuffle:
-                                    buffer.append(item)
-                                    if len(buffer) >= buffer_size:
-                                        idx = random.randrange(len(buffer))
-                                        item_to_upsert = buffer.pop(idx)
-                                        await process_item(item_to_upsert)
-                                else:
-                                    await process_item(item)
-                else:
-                    # Detect if it's actually JSONL or a standard JSON
-                    with open(file_path, "rb") as f:
-                        first_line = f.readline()
-                        f.seek(0)
-                        
-                        if first_line.strip().startswith(b"{") and not first_line.strip().endswith(b"]"):
-                            # This looks like JSONL despite the extension
-                            logger.info(f"File {file_path} looks like JSONL. Processing in streaming mode...")
-                            for line in f:
-                                if line.strip():
-                                    try:
-                                        item = json.loads(line)
-                                        if args.shuffle:
-                                            buffer.append(item)
-                                            if len(buffer) >= buffer_size:
-                                                idx = random.randrange(len(buffer))
-                                                item_to_upsert = buffer.pop(idx)
-                                                await process_item(item_to_upsert)
-                                        else:
-                                            await process_item(item)
-                                    except json.JSONDecodeError:
-                                        continue
+                with open(file_path, "rb") as f:
+                    logger.info(f"Processing {file_path} using ijson streaming parser...")
+                    
+                    first_char = ""
+                    while not first_char:
+                        chunk = f.read(1)
+                        if not chunk: break
+                        if not chunk.isspace():
+                            first_char = chunk.decode(errors='ignore')
+                    f.seek(0)
+
+                    if first_char == "[":
+                        items = ijson.items(f, "item")
+                    else:
+                        items = ijson.items(f, "", multiple_values=True)
+
+                    for item in items:
+                        if args.shuffle:
+                            buffer.append(item)
+                            if len(buffer) >= buffer_size:
+                                item_to_upsert = pick_from_buffer()
+                                await process_item(item_to_upsert)
                         else:
-                            # Standard JSON or array of objects, use ijson for streaming
-                            logger.info(f"Processing {file_path} as standard JSON using streaming parser...")
-                            # ijson.items returns a generator
-                            items = ijson.items(f, "item")
-                            for item in items:
-                                if args.shuffle:
-                                    buffer.append(item)
-                                    if len(buffer) >= buffer_size:
-                                        idx = random.randrange(len(buffer))
-                                        item_to_upsert = buffer.pop(idx)
-                                        await process_item(item_to_upsert)
-                                else:
-                                    await process_item(item)
+                            await process_item(item)
                 
                 # Flush the buffer if shuffling was enabled
                 if args.shuffle and buffer:
-                    random.shuffle(buffer)
-                    for item_to_upsert in buffer:
+                    while buffer:
+                        item_to_upsert = pick_from_buffer()
                         await process_item(item_to_upsert)
 
                 if active_tasks:
