@@ -305,7 +305,7 @@ async def import_cmd(args):
                     async with aiofiles.open(file_path, "r") as f:
                         active_tasks = set()
                         buffer = []
-                        buffer_size = 10000  # Reasonable buffer size for shuffling
+                        buffer_size = 5000  # Reduced buffer size to save memory
 
                         async def process_item(item_to_process):
                             task = asyncio.create_task(upsert_with_semaphore(item_to_process))
@@ -371,13 +371,12 @@ async def import_cmd(args):
             except Exception as e:
                 logger.error(f"Error reading file {file_path}: {e}")
 
-        logger.info(f"Found {len(files_to_import)} files to import. Starting...")
+        logger.info(f"Found {len(files_to_import)} files to import. Starting sequentially...")
 
-        tasks = [import_file(c, f) for c, f in files_to_import]
         pbar = tqdm(total=len(files_to_import), desc="Importing", unit="container")
 
-        for coro in asyncio.as_completed(tasks):
-            await coro
+        for container_name, file_path in files_to_import:
+            await import_file(container_name, file_path)
             pbar.update(1)
             elapsed = time.time() - start_time
             rus_per_sec = total_ru / elapsed if elapsed > 0 else 0
