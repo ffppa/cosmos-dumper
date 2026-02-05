@@ -214,7 +214,8 @@ async def export_cmd_async(args):
                 total_ru = sum(results)
         else:
             for inp in worker_inputs:
-                total_ru += export_container_worker(inp)
+                args_c, c_prop, folder = inp
+                total_ru += await export_container_task(args_c, c_prop, folder)
 
         elapsed = time.time() - start_time
         rus_per_sec = total_ru / elapsed if elapsed > 0 else 0
@@ -403,7 +404,8 @@ async def import_cmd_async(args):
             total_ru = sum(results)
     else:
         for inp in worker_inputs:
-            total_ru += import_file_worker(inp)
+            args_i, c_name, f_path = inp
+            total_ru += await import_file_task(args_i, c_name, f_path)
 
     elapsed = time.time() - start_time
     rus_per_sec = total_ru / elapsed if elapsed > 0 else 0
