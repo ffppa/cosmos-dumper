@@ -300,20 +300,16 @@ async def import_cmd(args):
                         logger.error(f"Error importing item in {container_name}: {e}")
 
 
-            def pick_from_buffer():
-                idx = random.randrange(len(buffer))
-                return buffer.pop(idx)
-
             try:
                 active_tasks = set()
-                buffer = []
-                buffer_size = 100000
+                shuffle_buffer = []
+                SHUFFLE_BUFFER_SIZE = 5000
 
                 async def process_item(item_to_process):
                     task = asyncio.create_task(upsert_with_semaphore(item_to_process))
                     active_tasks.add(task)
                     task.add_done_callback(active_tasks.discard)
-                    if len(active_tasks) >= args.concurrency + 5:
+                    if len(active_tasks) >= args.concurrency + 20:
                         await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
 
                 with open(file_path, "rb") as f:
@@ -334,18 +330,19 @@ async def import_cmd(args):
 
                     for item in items:
                         if args.shuffle:
-                            buffer.append(item)
-                            if len(buffer) >= buffer_size:
-                                item_to_upsert = pick_from_buffer()
-                                await process_item(item_to_upsert)
+                            shuffle_buffer.append(item)
+                            if len(shuffle_buffer) >= SHUFFLE_BUFFER_SIZE:
+                                idx = random.randrange(len(shuffle_buffer))
+                                item_to_send = shuffle_buffer.pop(idx)
+                                await process_item(item_to_send)
                         else:
                             await process_item(item)
                 
-                # Flush the buffer if shuffling was enabled
-                if args.shuffle and buffer:
-                    while buffer:
-                        item_to_upsert = pick_from_buffer()
-                        await process_item(item_to_upsert)
+                # Flush shuffle buffer
+                if shuffle_buffer:
+                    random.shuffle(shuffle_buffer)
+                    for item in shuffle_buffer:
+                        await process_item(item)
 
                 if active_tasks:
                     await asyncio.gather(*active_tasks)
@@ -430,13 +427,11 @@ def main():
     parser_import.add_argument(
         "--concurrency",
         type=int,
-        default=50,
-        help="Number of concurrent upserts (default: 50)",
+        default=200,
+        help="Number of concurrent upserts (default: 200)",
     )
     parser_import.add_argument(
-        "--shuffle",
-        action="store_true",
-        help="Shuffle items before importing to distribute load across partitions",
+        "--shuffle", action="store_true", help="Shuffle items before importing to distribute load"
     )
     parser_import.set_defaults(func=lambda args: asyncio.run(import_cmd(args)))
 

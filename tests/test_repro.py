@@ -6,10 +6,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from cosmos_dumper.cli import import_cmd
 
 @pytest.mark.asyncio
-async def test_import_with_shuffle_and_concurrency(tmp_path):
+async def test_import_with_concurrency(tmp_path):
     """
-    Reproduction test for shuffle and concurrency in import_cmd.
-    Ensures that when --shuffle is used, items are processed, and concurrency is respected.
+    Reproduction test for concurrency in import_cmd.
+    Ensures that items are processed and concurrency is respected.
     """
     # Create a dummy export file with many items to test concurrency logic
     export_dir = tmp_path / "export_dir"
