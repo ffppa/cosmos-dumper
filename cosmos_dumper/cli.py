@@ -18,7 +18,7 @@ import sys
 
 if sys.platform == "darwin":
     try:
-        multiprocess.set_start_method('spawn', force=True)
+        multiprocess.set_start_method("spawn", force=True)
     except RuntimeError:
         pass
 
@@ -80,32 +80,72 @@ async def export_container_task(args, container_properties, export_folder):
         db = client.get_database_client(database_name)
         container_ru = 0.0
 
-        async def writer_worker(queue, file_path, use_jsonl):
-            async with aiofiles.open(file_path, "w") as f:
+        async def writer_worker(queue, base_file_path, use_jsonl, max_size_gb):
+            max_size_bytes = max_size_gb * 1024 * 1024 * 1024
+            file_index = 0
+            current_file_size = 0
+
+            def get_next_file_path():
+                nonlocal file_index
+                file_index += 1
+                name, ext = os.path.splitext(base_file_path)
+                return f"{name}_{file_index}{ext}"
+
+            current_file_path = get_next_file_path()
+            f = await aiofiles.open(current_file_path, "w")
+
+            try:
                 if not use_jsonl:
                     await f.write("[\n")
+                    current_file_size += 2
 
-                first_item = True
+                first_item_in_file = True
                 while True:
                     batch = await queue.get()
                     if batch is None:
                         break
 
                     for item in batch:
-                        if not first_item:
+                        item_json = json.dumps(item)
+                        item_size = len(item_json)
+
+                        # Check if we need to rotate file
+                        if (
+                            current_file_size + item_size > max_size_bytes
+                            and not first_item_in_file
+                        ):
+                            if not use_jsonl:
+                                await f.write("\n]")
+                            await f.close()
+
+                            current_file_path = get_next_file_path()
+                            f = await aiofiles.open(current_file_path, "w")
+                            current_file_size = 0
+                            first_item_in_file = True
+
+                            if not use_jsonl:
+                                await f.write("[\n")
+                                current_file_size += 2
+
+                        if not first_item_in_file:
                             if use_jsonl:
                                 await f.write("\n")
+                                current_file_size += 1
                             else:
                                 await f.write(",\n")
+                                current_file_size += 2
 
-                        await f.write(json.dumps(item))
-                        first_item = False
+                        await f.write(item_json)
+                        current_file_size += item_size
+                        first_item_in_file = False
 
                     queue.task_done()
 
                 if not use_jsonl:
                     await f.write("\n]")
-            queue.task_done()
+            finally:
+                await f.close()
+                queue.task_done()
 
         logger.info(f"Starting export for container: {container_name}")
         container_client = db.get_container_client(container_name)
@@ -118,11 +158,11 @@ async def export_container_task(args, container_properties, export_folder):
             container_ru += charge
 
         extension = "jsonl" if use_jsonl else "json"
-        file_path = f"{export_folder}/{container_name}_export.{extension}"
+        base_file_path = f"{export_folder}/{container_name}_export.{extension}"
 
         queue = asyncio.Queue(maxsize=100)
         writer_task = asyncio.create_task(
-            writer_worker(queue, file_path, use_jsonl)
+            writer_worker(queue, base_file_path, use_jsonl, args.max_file_size)
         )
 
         async def fetch_range(feed_range):
@@ -200,13 +240,15 @@ async def export_cmd_async(args):
                 continue
             containers.append(c)
 
-        logger.info(f"Found {len(containers)} containers. Starting export with {args.workers} workers...")
+        logger.info(
+            f"Found {len(containers)} containers. Starting export with {args.workers} workers..."
+        )
 
         start_time = time.time()
-        
+
         # Prepare worker tasks
         worker_inputs = [(args, c, export_folder) for c in containers]
-        
+
         total_ru = 0.0
         if args.workers > 1 and len(containers) > 1:
             with mp.Pool(args.workers) as pool:
@@ -219,8 +261,10 @@ async def export_cmd_async(args):
 
         elapsed = time.time() - start_time
         rus_per_sec = total_ru / elapsed if elapsed > 0 else 0
-        
-        logger.info(f"Export completed in {elapsed:.2f}s. Total RU consumed: {total_ru:.2f} ({rus_per_sec:.2f} RU/s)")
+
+        logger.info(
+            f"Export completed in {elapsed:.2f}s. Total RU consumed: {total_ru:.2f} ({rus_per_sec:.2f} RU/s)"
+        )
 
 
 def export_cmd(args):
@@ -236,9 +280,7 @@ async def import_file_task(args, container_name, file_path):
         db = client.get_database_client(database_name)
         total_ru = 0.0
 
-        logger.info(
-            f"Starting import for container: {container_name} from {file_path}"
-        )
+        logger.info(f"Starting import for container: {container_name} from {file_path}")
         container_client = db.get_container_client(container_name)
 
         try:
@@ -247,11 +289,11 @@ async def import_file_task(args, container_name, file_path):
                 partition_key={"paths": ["/id"], "kind": "Hash"},
                 indexing_policy={"indexingMode": "none"},
             )
-            logger.debug(f"Container {container_name} verified/created with indexingMode: none.")
-        except Exception as e:
-            logger.warning(
-                f"Could not verify/create container {container_name}: {e}"
+            logger.debug(
+                f"Container {container_name} verified/created with indexingMode: none."
             )
+        except Exception as e:
+            logger.warning(f"Could not verify/create container {container_name}: {e}")
 
         # Keep track of original indexing policy to restore it later
         original_indexing_policy = None
@@ -290,17 +332,20 @@ async def import_file_task(args, container_name, file_path):
                 active_tasks.add(task)
                 task.add_done_callback(active_tasks.discard)
                 if len(active_tasks) >= args.concurrency + 20:
-                    await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
+                    await asyncio.wait(
+                        active_tasks, return_when=asyncio.FIRST_COMPLETED
+                    )
 
             with open(file_path, "rb") as f:
                 logger.info(f"Processing {file_path} using ijson streaming parser...")
-                
+
                 first_char = ""
                 while not first_char:
                     chunk = f.read(1)
-                    if not chunk: break
+                    if not chunk:
+                        break
                     if not chunk.isspace():
-                        first_char = chunk.decode(errors='ignore')
+                        first_char = chunk.decode(errors="ignore")
                 f.seek(0)
 
                 if first_char == "[":
@@ -317,7 +362,7 @@ async def import_file_task(args, container_name, file_path):
                             await process_item(item_to_send)
                     else:
                         await process_item(item)
-            
+
             # Flush shuffle buffer
             if shuffle_buffer:
                 random.shuffle(shuffle_buffer)
@@ -327,17 +372,20 @@ async def import_file_task(args, container_name, file_path):
             if active_tasks:
                 await asyncio.gather(*active_tasks)
 
-            logger.success(
-                f"Imported {items_imported} items into [{container_name}]"
-            )
+            logger.success(f"Imported {items_imported} items into [{container_name}]")
 
-            if original_indexing_policy and original_indexing_policy.get("indexingMode") != "none":
+            if (
+                original_indexing_policy
+                and original_indexing_policy.get("indexingMode") != "none"
+            ):
                 logger.info(f"Restoring indexing policy for {container_name}...")
                 try:
                     await db.replace_container(container_name, original_indexing_policy)
                     logger.success(f"Indexing policy restored for {container_name}")
                 except Exception as e:
-                    logger.error(f"Failed to restore indexing policy for {container_name}: {e}")
+                    logger.error(
+                        f"Failed to restore indexing policy for {container_name}: {e}"
+                    )
             return total_ru
         except Exception as e:
             logger.error(f"Error reading file {file_path}: {e}")
@@ -365,12 +413,10 @@ async def import_cmd_async(args):
 
     files_to_import = []
     if os.path.isfile(path):
-        container_name = (
-            target_container or os.path.basename(path).split("_export")[0]
-        )
+        container_name = target_container or os.path.basename(path).split("_export")[0]
         files_to_import.append((container_name, path))
     elif os.path.isdir(path):
-        pattern = os.path.join(path, "*_export.*")
+        pattern = os.path.join(path, "*_export*.*")
         for f in glob.glob(pattern):
             if f.endswith((".json", ".jsonl")):
                 original_container_name = os.path.basename(f).split("_export")[0]
@@ -392,11 +438,16 @@ async def import_cmd_async(args):
         logger.warning(f"No files found to import in {path}")
         return
 
-    logger.info(f"Found {len(files_to_import)} files to import. Starting with {args.workers} workers...")
+    logger.info(
+        f"Found {len(files_to_import)} files to import. Starting with {args.workers} workers..."
+    )
     start_time = time.time()
 
-    worker_inputs = [(args, container_name, file_path) for container_name, file_path in files_to_import]
-    
+    worker_inputs = [
+        (args, container_name, file_path)
+        for container_name, file_path in files_to_import
+    ]
+
     total_ru = 0.0
     if args.workers > 1 and len(files_to_import) > 1:
         with mp.Pool(args.workers) as pool:
@@ -409,7 +460,9 @@ async def import_cmd_async(args):
 
     elapsed = time.time() - start_time
     rus_per_sec = total_ru / elapsed if elapsed > 0 else 0
-    logger.info(f"Import completed in {elapsed:.2f}s. Total RU consumed: {total_ru:.2f} ({rus_per_sec:.2f} RU/s)")
+    logger.info(
+        f"Import completed in {elapsed:.2f}s. Total RU consumed: {total_ru:.2f} ({rus_per_sec:.2f} RU/s)"
+    )
 
 
 def import_cmd(args):
@@ -457,6 +510,12 @@ def main():
     parser_export.add_argument(
         "--container", help="Export only this specific container"
     )
+    parser_export.add_argument(
+        "--max-file-size",
+        type=int,
+        default=20,
+        help="Max file size in GB before splitting (default: 20)",
+    )
     parser_export.set_defaults(func=export_cmd)
 
     # Import Subparser
@@ -476,11 +535,11 @@ def main():
         help="Number of concurrent upserts (default: 200)",
     )
     parser_import.add_argument(
-        "--shuffle", action="store_true", help="Shuffle items before importing to distribute load"
+        "--shuffle",
+        action="store_true",
+        help="Shuffle items before importing to distribute load",
     )
-    parser_import.add_argument(
-        "--container", help="Target container name in Cosmos DB"
-    )
+    parser_import.add_argument("--container", help="Target container name in Cosmos DB")
     parser_import.set_defaults(func=import_cmd)
 
     args = parser.parse_args()
