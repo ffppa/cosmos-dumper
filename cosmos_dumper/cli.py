@@ -305,13 +305,13 @@ async def import_cmd(args):
                     async with aiofiles.open(file_path, "r") as f:
                         active_tasks = set()
                         buffer = []
-                        buffer_size = 5000  # Reduced buffer size to save memory
+                        buffer_size = 200  # buffer size to avoid OOM with large items
 
                         async def process_item(item_to_process):
                             task = asyncio.create_task(upsert_with_semaphore(item_to_process))
                             active_tasks.add(task)
                             task.add_done_callback(active_tasks.discard)
-                            if len(active_tasks) >= args.concurrency * 2:
+                            if len(active_tasks) >= args.concurrency + 5:
                                 await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
 
                         async for line in f:
@@ -335,27 +335,73 @@ async def import_cmd(args):
                         if active_tasks:
                             await asyncio.gather(*active_tasks)
                 else:
-                    # For non-JSONL files, we still have a potential memory issue if the file is huge.
-                    # But standard JSON must be valid, so we usually have to read it all unless we use a streaming parser.
+                    # For non-JSONL files, we try to detect if it's actually JSONL or a small JSON
                     async with aiofiles.open(file_path, "r") as f:
-                        content = await f.read()
-                        data = json.loads(content)
-                        items = data if isinstance(data, list) else [data]
+                        first_line = await f.readline()
+                        if first_line.strip().startswith("{") and not first_line.strip().endswith("]"):
+                            # This looks like JSONL despite the extension
+                            logger.info(f"File {file_path} looks like JSONL. Processing in streaming mode...")
+                            await f.seek(0)
+                            active_tasks = set()
+                            buffer = []
+                            buffer_size = 200
 
-                        if args.shuffle:
-                            random.shuffle(items)
+                            async def process_item_inner(item_to_process):
+                                task = asyncio.create_task(upsert_with_semaphore(item_to_process))
+                                active_tasks.add(task)
+                                task.add_done_callback(active_tasks.discard)
+                                if len(active_tasks) >= args.concurrency + 5:
+                                    await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
 
-                        active_tasks = set()
-                        for item in items:
-                            task = asyncio.create_task(upsert_with_semaphore(item))
-                            active_tasks.add(task)
-                            task.add_done_callback(active_tasks.discard)
+                            async for line in f:
+                                if line.strip():
+                                    try:
+                                        item = json.loads(line)
+                                        if args.shuffle:
+                                            buffer.append(item)
+                                            if len(buffer) >= buffer_size:
+                                                idx = random.randrange(len(buffer))
+                                                item_to_upsert = buffer.pop(idx)
+                                                await process_item_inner(item_to_upsert)
+                                        else:
+                                            await process_item_inner(item)
+                                    except json.JSONDecodeError:
+                                        continue
                             
-                            if len(active_tasks) >= args.concurrency * 2:
-                                await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
-                        
-                        if active_tasks:
-                            await asyncio.gather(*active_tasks)
+                            if args.shuffle and buffer:
+                                random.shuffle(buffer)
+                                for item_to_upsert in buffer:
+                                    await process_item_inner(item_to_upsert)
+                            
+                            if active_tasks:
+                                await asyncio.gather(*active_tasks)
+                        else:
+                            # Standard JSON, read all (still risky for 500GB but at least we tried)
+                            # Only if it's reasonably small
+                            file_size = os.path.getsize(file_path)
+                            if file_size > 1024 * 1024 * 500: # 500MB
+                                logger.error(f"File {file_path} is too large for standard JSON parsing ({file_size / 1024 / 1024:.2f} MB). Please use JSONL.")
+                                return
+
+                            await f.seek(0)
+                            content = await f.read()
+                            data = json.loads(content)
+                            items = data if isinstance(data, list) else [data]
+
+                            if args.shuffle:
+                                random.shuffle(items)
+
+                            active_tasks = set()
+                            for item in items:
+                                task = asyncio.create_task(upsert_with_semaphore(item))
+                                active_tasks.add(task)
+                                task.add_done_callback(active_tasks.discard)
+                                
+                                if len(active_tasks) >= args.concurrency + 5:
+                                    await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
+                            
+                            if active_tasks:
+                                await asyncio.gather(*active_tasks)
 
                 logger.success(
                     f"Imported {items_imported} items into [{container_name}]"
