@@ -16,7 +16,7 @@ A high-performance CLI tool to import/export data from Azure Cosmos DB (SQL API)
 ## Requirements
 
 - Python 3.14+
-- [PDM](https://pdm.fming.dev/) (Package Manager)
+- [PDM](https://pdm.fming.dev/) (Package Manager) or PIP 25+
 
 ## Installation
 
@@ -29,6 +29,10 @@ A high-performance CLI tool to import/export data from Azure Cosmos DB (SQL API)
 2. Install dependencies with PDM:
    ```bash
    pdm install
+   ```
+3. (OR) Install with PIP
+   ```bash
+   pip install .    
    ```
 
 ## Configuration
