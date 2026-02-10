@@ -15,6 +15,7 @@ import ijson
 import pathos.multiprocessing as mp
 import multiprocess
 import sys
+import warnings
 import pymongo
 from bson import json_util
 
@@ -225,7 +226,9 @@ async def export_container_mongodb_task(args, container_properties, export_folde
     use_jsonl = args.jsonl
     container_name = container_properties.get("name", container_properties.get("id"))
 
-    client = pymongo.MongoClient(connection_string)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*connected to a CosmosDB cluster.*")
+        client = pymongo.MongoClient(connection_string)
     try:
         db = client[database_name]
         collection = db[container_name]
@@ -331,7 +334,9 @@ async def export_cmd_async(args):
 
     containers = []
     if bool(getattr(args, "__dict__", {}).get("mongo", False)):
-        mongo_client = pymongo.MongoClient(url)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*connected to a CosmosDB cluster.*")
+            mongo_client = pymongo.MongoClient(url)
         try:
             db_mongo = mongo_client[database_name]
             for coll_name in db_mongo.list_collection_names():
@@ -507,7 +512,9 @@ async def import_file_mongodb_task(args, container_name, file_path):
     connection_string = args.url
     database_name = args.db
 
-    client = pymongo.MongoClient(connection_string)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*connected to a CosmosDB cluster.*")
+        client = pymongo.MongoClient(connection_string)
     try:
         db = client[database_name]
         collection = db[container_name]
