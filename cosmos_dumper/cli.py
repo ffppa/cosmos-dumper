@@ -15,6 +15,9 @@ import ijson
 import pathos.multiprocessing as mp
 import multiprocess
 import sys
+import warnings
+import pymongo
+from bson import json_util
 
 if sys.platform == "darwin":
     try:
@@ -70,6 +73,9 @@ def print_banner():
 
 
 async def export_container_task(args, container_properties, export_folder):
+    if bool(getattr(args, "__dict__", {}).get("mongo", False)):
+        return await export_container_mongodb_task(args, container_properties, export_folder)
+    
     url = args.url
     key = args.key
     database_name = args.db
@@ -214,57 +220,159 @@ def export_container_worker(args_container_folder):
     return asyncio.run(export_container_task(args, container_properties, export_folder))
 
 
+async def export_container_mongodb_task(args, container_properties, export_folder):
+    connection_string = args.url
+    database_name = args.db
+    use_jsonl = args.jsonl
+    container_name = container_properties.get("name", container_properties.get("id"))
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*connected to a CosmosDB cluster.*")
+        client = pymongo.MongoClient(connection_string)
+    try:
+        db = client[database_name]
+        collection = db[container_name]
+
+        extension = "jsonl" if use_jsonl else "json"
+        base_file_path = f"{export_folder}/{container_name}_export.{extension}"
+        
+        logger.info(f"Starting MongoDB export for collection: {container_name}")
+        
+        max_size_bytes = args.max_file_size * 1024 * 1024 * 1024
+        file_index = 0
+        
+        def get_next_file_path():
+            nonlocal file_index
+            file_index += 1
+            name, ext = os.path.splitext(base_file_path)
+            return f"{name}_{file_index}{ext}"
+
+        current_file_path = get_next_file_path()
+        item_count = 0
+
+        cursor = collection.find({})
+        
+        f = open(current_file_path, "w")
+        try:
+            if not use_jsonl:
+                f.write("[\n")
+            
+            first_item_in_file = True
+            current_file_size = 2 if not use_jsonl else 0
+            
+            for item in cursor:
+                # Convert BSON to JSON
+                item_json = json.dumps(item, default=json_util.default)
+                item_size = len(item_json)
+                
+                if current_file_size + item_size > max_size_bytes and not first_item_in_file:
+                    if not use_jsonl:
+                        f.write("\n]")
+                    f.close()
+                    
+                    current_file_path = get_next_file_path()
+                    f = open(current_file_path, "w")
+                    current_file_size = 0
+                    first_item_in_file = True
+                    
+                    if not use_jsonl:
+                        f.write("[\n")
+                        current_file_size += 2
+                
+                if not first_item_in_file:
+                    if use_jsonl:
+                        f.write("\n")
+                        current_file_size += 1
+                    else:
+                        f.write(",\n")
+                        current_file_size += 2
+                
+                f.write(item_json)
+                current_file_size += item_size
+                first_item_in_file = False
+                item_count += 1
+                
+            if not use_jsonl:
+                f.write("\n]")
+        finally:
+            f.close()
+
+        logger.success(f"Exported {item_count} items from collection [{container_name}].")
+        return 0.0
+    except Exception as e:
+        logger.error(f"Error exporting MongoDB collection {container_name}: {e}")
+        return 0.0
+    finally:
+        client.close()
+
+
 async def export_cmd_async(args):
     url = args.url
     key = args.key
     database_name = args.db
     target_container = args.container
 
-    if not all([url, key, database_name]):
+    if not bool(getattr(args, "__dict__", {}).get("mongo", False)) and not all([url, key, database_name]):
         logger.error(
             "Missing configuration. Please provide --url, --key, and --db or set environment variables."
         )
         return
 
-    async with CosmosClient(url, credential=key) as client:
-        db = client.get_database_client(database_name)
-        logger.info(f"Connected to database: {database_name}")
+    async def run_cosmos():
+        async with CosmosClient(url, credential=key) as client:
+            db = client.get_database_client(database_name)
+            logger.info(f"Connected to database: {database_name}")
 
-        today = datetime.today().strftime("%Y-%m-%d-%H-%M")
-        export_folder = f"export/{database_name}_{today}"
-        os.makedirs(export_folder, exist_ok=True)
+            async for c in db.list_containers():
+                if target_container and c["id"] != target_container:
+                    continue
+                containers.append(c)
 
-        containers = []
-        async for c in db.list_containers():
-            if target_container and c["id"] != target_container:
-                continue
-            containers.append(c)
+    today = datetime.today().strftime("%Y-%m-%d-%H-%M")
+    export_folder = f"export/{database_name}_{today}"
+    os.makedirs(export_folder, exist_ok=True)
 
-        logger.info(
-            f"Found {len(containers)} containers. Starting export with {args.workers} workers..."
-        )
+    containers = []
+    if bool(getattr(args, "__dict__", {}).get("mongo", False)):
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*connected to a CosmosDB cluster.*")
+            mongo_client = pymongo.MongoClient(url)
+        try:
+            db_mongo = mongo_client[database_name]
+            for coll_name in db_mongo.list_collection_names():
+                if target_container and coll_name != target_container:
+                    continue
+                containers.append({"id": coll_name, "name": coll_name})
+        finally:
+            mongo_client.close()
+    else:
+        await run_cosmos()
 
-        start_time = time.time()
+    logger.info(
+        f"Found {len(containers)} containers. Starting export with {args.workers} workers..."
+    )
 
-        # Prepare worker tasks
-        worker_inputs = [(args, c, export_folder) for c in containers]
+    start_time = time.time()
 
-        total_ru = 0.0
-        if args.workers > 1 and len(containers) > 1:
-            with mp.Pool(args.workers) as pool:
-                results = pool.map(export_container_worker, worker_inputs)
-                total_ru = sum(results)
-        else:
-            for inp in worker_inputs:
-                args_c, c_prop, folder = inp
-                total_ru += await export_container_task(args_c, c_prop, folder)
+    # Prepare worker tasks
+    worker_inputs = [(args, c, export_folder) for c in containers]
 
-        elapsed = time.time() - start_time
-        rus_per_sec = total_ru / elapsed if elapsed > 0 else 0
+    total_ru = 0.0
+    if args.workers > 1 and len(containers) > 1:
+        with mp.Pool(args.workers) as pool:
+            results = pool.map(export_container_worker, worker_inputs)
+            total_ru = sum(results)
+    else:
+        for inp in worker_inputs:
+            args_c, c_prop, folder = inp
+            total_ru += await export_container_task(args_c, c_prop, folder)
 
-        logger.info(
-            f"Export completed in {elapsed:.2f}s. Total RU consumed: {total_ru:.2f} ({rus_per_sec:.2f} RU/s)"
-        )
+    elapsed = time.time() - start_time
+    rus_per_sec = total_ru / elapsed if elapsed > 0 else 0
+
+    logger.info(
+        f"Export completed in {elapsed:.2f}s. Total RU consumed: {total_ru:.2f} ({rus_per_sec:.2f} RU/s)"
+    )
 
 
 def export_cmd(args):
@@ -272,6 +380,9 @@ def export_cmd(args):
 
 
 async def import_file_task(args, container_name, file_path):
+    if bool(getattr(args, "__dict__", {}).get("mongo", False)):
+        return await import_file_mongodb_task(args, container_name, file_path)
+    
     url = args.url
     key = args.key
     database_name = args.db
@@ -397,6 +508,76 @@ def import_file_worker(args_container_file):
     return asyncio.run(import_file_task(args, container_name, file_path))
 
 
+async def import_file_mongodb_task(args, container_name, file_path):
+    connection_string = args.url
+    database_name = args.db
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*connected to a CosmosDB cluster.*")
+        client = pymongo.MongoClient(connection_string)
+    try:
+        db = client[database_name]
+        collection = db[container_name]
+        
+        logger.info(f"Starting MongoDB import for collection: {container_name} from {file_path}")
+        
+        items_imported = 0
+        batch = []
+        BATCH_SIZE = 500
+
+        def flush_batch(b):
+            if not b:
+                return 0
+            try:
+                requests = [
+                    pymongo.ReplaceOne({"_id": item.get("_id", item.get("id"))}, item, upsert=True)
+                    for item in b
+                ]
+                result = collection.bulk_write(requests)
+                return len(b)
+            except Exception as e:
+                logger.error(f"Error in MongoDB bulk write for {container_name}: {e}")
+                return 0
+
+        with open(file_path, "rb") as f:
+            first_char = ""
+            while not first_char:
+                chunk = f.read(1)
+                if not chunk:
+                    break
+                if not chunk.isspace():
+                    first_char = chunk.decode(errors="ignore")
+            f.seek(0)
+
+            if first_char == "[":
+                items = ijson.items(f, "item")
+            else:
+                items = ijson.items(f, "", multiple_values=True)
+
+            for item in items:
+                item_str = json.dumps(item)
+                item = json_util.loads(item_str)
+
+                # Fix for MongoDB _id if it was 'id' in Cosmos SQL
+                if "id" in item and "_id" not in item:
+                    item["_id"] = item["id"]
+
+                batch.append(item)
+                if len(batch) >= BATCH_SIZE:
+                    items_imported += flush_batch(batch)
+                    batch = []
+            
+            items_imported += flush_batch(batch)
+
+        logger.success(f"Imported {items_imported} items into MongoDB collection [{container_name}]")
+        return 0.0
+    except Exception as e:
+        logger.error(f"Error importing to MongoDB collection {container_name}: {e}")
+        return 0.0
+    finally:
+        client.close()
+
+
 async def import_cmd_async(args):
     url = args.url
     key = args.key
@@ -405,7 +586,7 @@ async def import_cmd_async(args):
     target_container = args.container
     from_container = getattr(args, "from_container", None)
 
-    if not all([url, key, database_name, path]):
+    if not bool(getattr(args, "__dict__", {}).get("mongo", False)) and not all([url, key, database_name, path]):
         logger.error(
             "Missing configuration. Please provide --url, --key, --db and --path."
         )
@@ -493,6 +674,11 @@ def main():
             "--db",
             default=os.getenv("COSMOS_EXPORT_DB_NAME"),
             help="Cosmos DB Database Name",
+        )
+        p.add_argument(
+            "--mongo",
+            action="store_true",
+            help="Use MongoDB drivers.",
         )
         p.add_argument(
             "--workers",

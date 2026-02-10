@@ -68,6 +68,12 @@ Example:
 pdm run cosmos-dumper export --jsonl --workers 8
 ```
 
+#### MongoDB Export:
+To export from a MongoDB-compatible database (like Cosmos DB for MongoDB):
+```bash
+pdm run cosmos-dumper export --mongo --url "mongodb://your-connection-string" --db your_db_name --jsonl
+```
+
 ### 2. Importing Data
 
 ```bash
@@ -87,6 +93,12 @@ Example:
 ```bash
 # Massive parallel import with shuffling and high concurrency
 pdm run cosmos-dumper import --path ./export/my_dump --workers 4 --concurrency 300 --shuffle
+```
+
+#### MongoDB Import:
+To import into a MongoDB-compatible database:
+```bash
+pdm run cosmos-dumper import --mongo --url "mongodb://your-connection-string" --db your_db_name --path ./export/your_dump
 ```
 
 ## Performance Tips
