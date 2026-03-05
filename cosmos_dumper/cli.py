@@ -523,7 +523,7 @@ async def import_file_mongodb_task(args, container_name, file_path):
         
         items_imported = 0
         batch = []
-        BATCH_SIZE = args.mongo_batch_size
+        BATCH_SIZE = int(args.mongo_batch_size)
 
         def flush_batch(b):
             if not b:
@@ -724,11 +724,6 @@ def main():
         "--shuffle",
         action="store_true",
         help="Shuffle items before importing to distribute load",
-    )
-    parser_import.add_argument(
-        "--mongo-batch-size",
-        default=30,
-        help="Set MongoDB import batch size (default: 30)",
     )
     parser_import.add_argument("--container", help="Target container name in Cosmos DB")
     parser_import.set_defaults(func=import_cmd)
