@@ -523,7 +523,7 @@ async def import_file_mongodb_task(args, container_name, file_path):
         
         items_imported = 0
         batch = []
-        BATCH_SIZE = args.mongo_batch_size
+        BATCH_SIZE = int(args.mongo_batch_size)
 
         def flush_batch(b):
             if not b:
