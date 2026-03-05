@@ -725,11 +725,6 @@ def main():
         action="store_true",
         help="Shuffle items before importing to distribute load",
     )
-    parser_import.add_argument(
-        "--mongo-batch-size",
-        default=30,
-        help="Set MongoDB import batch size (default: 30)",
-    )
     parser_import.add_argument("--container", help="Target container name in Cosmos DB")
     parser_import.set_defaults(func=import_cmd)
 
