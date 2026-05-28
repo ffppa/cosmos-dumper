@@ -87,12 +87,18 @@ pdm run cosmos-dumper import --path <file_or_directory> [options]
 - `--from-container`: Filter a specific container from a directory of exports.
 - `--workers`: Number of parallel files to process (default: number of CPUs).
 - `--concurrency`: Number of concurrent upserts per worker (default: 200).
+- `--max-retries`: Max retries per item on transient failures like 429 (default: 12).
+- `--retry-base-delay`: Base delay in seconds for exponential backoff (default: 0.25).
+- `--retry-max-delay`: Max delay in seconds for backoff cap (default: 30).
+- `--failed-items-path`: Optional JSONL path for non-recoverable items. You can use `{container}` in the path to keep one failed file per container.
 - `--shuffle`: Enable streaming shuffle to distribute load across partitions.
 
 Example:
 ```bash
-# Massive parallel import with shuffling and high concurrency
-pdm run cosmos-dumper import --path ./export/my_dump --workers 4 --concurrency 300 --shuffle
+# Resilient import with bounded retries and failed-item capture
+pdm run cosmos-dumper import --path ./export/my_dump --workers 2 --concurrency 40 --shuffle \
+  --max-retries 30 --retry-base-delay 0.2 --retry-max-delay 20 \
+  --failed-items-path ./export/failed/{container}_failed.jsonl
 ```
 
 #### MongoDB Import:
