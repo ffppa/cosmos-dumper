@@ -419,19 +419,110 @@ async def import_file_task(args, container_name, file_path):
             charge = float(headers.get("x-ms-request-charge", 0))
             total_ru += charge
 
+        max_retries = max(0, int(getattr(args, "max_retries", 12)))
+        retry_base_delay = max(0.01, float(getattr(args, "retry_base_delay", 0.25)))
+        retry_max_delay = max(
+            retry_base_delay, float(getattr(args, "retry_max_delay", 30.0))
+        )
+        failed_items_path_template = getattr(args, "failed_items_path", None)
+        failed_items_path = None
+        if failed_items_path_template:
+            failed_items_path = failed_items_path_template.format(
+                container=container_name
+            )
+
         items_imported = 0
+        items_failed = 0
         semaphore = asyncio.Semaphore(args.concurrency)
 
-        async def upsert_with_semaphore(item):
-            nonlocal items_imported
-            async with semaphore:
+        failed_item_queue = None
+        failed_writer_task = None
+
+        async def failed_item_writer(queue, output_path):
+            os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+            async with aiofiles.open(output_path, "a") as failed_file:
+                while True:
+                    payload = await queue.get()
+                    if payload is None:
+                        queue.task_done()
+                        break
+                    await failed_file.write(json.dumps(payload, default=str) + "\n")
+                    queue.task_done()
+
+        if failed_items_path:
+            failed_item_queue = asyncio.Queue(maxsize=1000)
+            failed_writer_task = asyncio.create_task(
+                failed_item_writer(failed_item_queue, failed_items_path)
+            )
+
+        def is_too_many_requests(exc):
+            status_code = getattr(exc, "status_code", None)
+            if status_code == 429:
+                return True
+            message = str(exc)
+            return "TooManyRequests" in message or "Code: 429" in message
+
+        def get_retry_after_seconds(exc):
+            retry_after = getattr(exc, "retry_after", None)
+            if retry_after is not None:
                 try:
-                    await container_client.upsert_item(
-                        item, response_hook=response_hook
-                    )
-                    items_imported += 1
-                except Exception as e:
-                    logger.error(f"Error importing item in {container_name}: {e}")
+                    return float(retry_after)
+                except (TypeError, ValueError):
+                    pass
+
+            headers = getattr(exc, "headers", None) or getattr(
+                exc, "response_headers", None
+            )
+            if isinstance(headers, dict):
+                retry_after_ms = headers.get("x-ms-retry-after-ms")
+                if retry_after_ms is not None:
+                    try:
+                        return max(0.0, float(retry_after_ms) / 1000.0)
+                    except (TypeError, ValueError):
+                        pass
+                retry_after_s = headers.get("Retry-After")
+                if retry_after_s is not None:
+                    try:
+                        return max(0.0, float(retry_after_s))
+                    except (TypeError, ValueError):
+                        pass
+            return None
+
+        async def upsert_with_semaphore(item):
+            nonlocal items_imported, items_failed
+            async with semaphore:
+                for attempt in range(max_retries + 1):
+                    try:
+                        await container_client.upsert_item(
+                            item, response_hook=response_hook
+                        )
+                        items_imported += 1
+                        return
+                    except Exception as e:
+                        if is_too_many_requests(e) and attempt < max_retries:
+                            retry_after = get_retry_after_seconds(e)
+                            exponential = min(
+                                retry_max_delay, retry_base_delay * (2**attempt)
+                            )
+                            base_sleep = retry_after if retry_after is not None else exponential
+                            # Add jitter to avoid synchronized retries across workers.
+                            sleep_for = min(
+                                retry_max_delay,
+                                base_sleep
+                                + random.uniform(0, max(0.05, base_sleep * 0.2)),
+                            )
+                            if attempt == 0 or (attempt + 1) % 5 == 0:
+                                logger.warning(
+                                    f"429 on {container_name}, retry {attempt + 1}/{max_retries} in {sleep_for:.2f}s"
+                                )
+                            await asyncio.sleep(sleep_for)
+                            continue
+
+                        items_failed += 1
+                        logger.error(f"Error importing item in {container_name}: {e}")
+                        if failed_item_queue:
+                            await failed_item_queue.put(item)
+                        return
 
         try:
             active_tasks = set()
@@ -483,7 +574,14 @@ async def import_file_task(args, container_name, file_path):
             if active_tasks:
                 await asyncio.gather(*active_tasks)
 
-            logger.success(f"Imported {items_imported} items into [{container_name}]")
+            if items_failed:
+                logger.warning(
+                    f"Imported {items_imported} items into [{container_name}] with {items_failed} failed items"
+                )
+                if failed_items_path:
+                    logger.warning(f"Failed items were saved to: {failed_items_path}")
+            else:
+                logger.success(f"Imported {items_imported} items into [{container_name}]")
 
             if (
                 original_indexing_policy
@@ -501,6 +599,11 @@ async def import_file_task(args, container_name, file_path):
         except Exception as e:
             logger.error(f"Error reading file {file_path}: {e}")
             return 0.0
+        finally:
+            if failed_item_queue and failed_writer_task:
+                await failed_item_queue.put(None)
+                await failed_item_queue.join()
+                await failed_writer_task
 
 
 def import_file_worker(args_container_file):
@@ -719,6 +822,28 @@ def main():
         type=int,
         default=200,
         help="Number of concurrent upserts (default: 200)",
+    )
+    parser_import.add_argument(
+        "--max-retries",
+        type=int,
+        default=12,
+        help="Max retries per item on transient failures (default: 12)",
+    )
+    parser_import.add_argument(
+        "--retry-base-delay",
+        type=float,
+        default=0.25,
+        help="Base delay in seconds for retry backoff (default: 0.25)",
+    )
+    parser_import.add_argument(
+        "--retry-max-delay",
+        type=float,
+        default=30.0,
+        help="Max delay in seconds for retry backoff (default: 30.0)",
+    )
+    parser_import.add_argument(
+        "--failed-items-path",
+        help="Optional JSONL path where non-recoverable items are appended",
     )
     parser_import.add_argument(
         "--shuffle",
